@@ -105,6 +105,7 @@ export class RandomGen8Teams {
 	format: Format;
 	prng: PRNG;
 	noStab: string[];
+	priorityPokemon: string[];
 	readonly maxTeamSize: number;
 	readonly adjustLevel: number | null;
 	readonly maxMoveCount: number;
@@ -124,6 +125,7 @@ export class RandomGen8Teams {
 		this.dex = Dex.forFormat(format);
 		this.gen = this.dex.gen;
 		this.noStab = NO_STAB;
+		this.priorityPokemon = [];
 
 		const ruleTable = Dex.formats.getRuleTable(format);
 		this.maxTeamSize = ruleTable.maxTeamSize;
@@ -429,28 +431,11 @@ export class RandomGen8Teams {
 			// Four random unique moves from the movepool
 			let pool = ['struggle'];
 			if (forme === 'Smeargle') {
-				pool = this.dex.moves
-					.all()
+				pool = this.dex.moves.all()
 					.filter(move => !(move.isNonstandard || move.isZ || move.isMax || move.realMove))
 					.map(m => m.id);
 			} else {
-				const formes = ['gastrodoneast', 'pumpkaboosuper', 'zygarde10'];
-				let learnset = this.dex.species.getLearnset(species.id);
-				if (formes.includes(species.id) || !learnset) {
-					learnset = this.dex.species.getLearnset(this.dex.species.get(species.baseSpecies).id);
-				}
-				if (learnset) {
-					pool = Object.keys(learnset).filter(
-						moveid => learnset![moveid].find(learned => learned.startsWith(String(this.gen)))
-					);
-				}
-				if (species.changesFrom) {
-					learnset = this.dex.species.getLearnset(toID(species.changesFrom));
-					const basePool = Object.keys(learnset!).filter(
-						moveid => learnset![moveid].find(learned => learned.startsWith(String(this.gen)))
-					);
-					pool = [...new Set(pool.concat(basePool))];
-				}
+				pool = [...this.dex.species.getMovePool(species.id)];
 			}
 
 			const moves = this.multipleSamplesNoReplace(pool, this.maxMoveCount);
@@ -548,9 +533,6 @@ export class RandomGen8Teams {
 		// Picks `n` random pokemon--no repeats, even among formes
 		// Also need to either normalize for formes or select formes at random
 		// Unreleased are okay but no CAP
-		const last = [0, 151, 251, 386, 493, 649, 721, 807, 898, 1010][this.gen];
-
-		if (n <= 0 || n > last) throw new Error(`n must be a number between 1 and ${last} (got ${n})`);
 		if (requiredType && !this.dex.types.get(requiredType).exists) {
 			throw new Error(`"${requiredType}" is not a valid type.`);
 		}
@@ -564,15 +546,13 @@ export class RandomGen8Teams {
 			for (const species of speciesPool) {
 				if (species.isNonstandard && species.isNonstandard !== 'Unobtainable') continue;
 				if (requireMoves) {
-					const hasMovesInCurrentGen = Object.values(this.dex.species.getLearnset(species.id) || {})
-						.some(sources => sources.some(source => source.startsWith('9')));
+					const hasMovesInCurrentGen = this.dex.species.getMovePool(species.id).size;
 					if (!hasMovesInCurrentGen) continue;
 				}
 				if (requiredType && !species.types.includes(requiredType)) continue;
 				if (minSourceGen && species.gen < minSourceGen) continue;
 				const num = species.num;
 				if (num <= 0 || pool.includes(num)) continue;
-				if (num > last) break;
 				pool.push(num);
 			}
 		} else {
@@ -632,6 +612,7 @@ export class RandomGen8Teams {
 			if (!(species.num in hasDexNumber)) continue;
 			if (isNotCustom && (species.gen > this.gen ||
 				(species.isNonstandard && species.isNonstandard !== 'Unobtainable'))) continue;
+			if (requiredType && !species.types.includes(requiredType)) continue;
 			if (!formes[hasDexNumber[species.num]]) formes[hasDexNumber[species.num]] = [];
 			formes[hasDexNumber[species.num]].push(species.name);
 		}
@@ -2171,7 +2152,7 @@ export class RandomGen8Teams {
 			(isDoubles && data.doublesMoves) ||
 			(isNoDynamax && data.noDynamaxMoves) ||
 			data.moves;
-		const movePool = (randMoves || Object.keys(this.dex.species.getLearnset(species.id)!)).slice();
+		const movePool: string[] = [...(randMoves || this.dex.species.getMovePool(species.id))];
 		if (this.format.gameType === 'multi' || this.format.gameType === 'freeforall') {
 			// Random Multi Battle uses doubles move pools, but Ally Switch fails in multi battles
 			// Random Free-For-All also uses doubles move pools, for now
@@ -2506,16 +2487,12 @@ export class RandomGen8Teams {
 
 			// Illusion shouldn't be on the last slot
 			if (species.name === 'Zoroark' && pokemon.length >= (this.maxTeamSize - 1)) continue;
-			// The sixth slot should not be very low level if a zoroark is present
-			// Also Zacian/Zamazenta/Eternatus are rejected as they make dynamax malfunction, regardless of level
+			// The sixth slot should not be Zacian/Zamazenta/Eternatus if Zoroark is present,
+			// as they make dynamax malfunction, regardless of level
 			if (
 				pokemon.some(pkmn => pkmn.name === 'Zoroark') &&
 				pokemon.length >= (this.maxTeamSize - 1) &&
-				(this.getLevel(species,
-							  isDoubles,
-							  this.dex.formats.getRuleTable(this.format).has('dynamaxclause')) < 72 &&
-				!this.adjustLevel ||
-				['Zacian', 'Zacian-Crowned', 'Zamazenta', 'Zamazenta-Crowned', 'Eternatus'].includes(species.name))
+				['Zacian', 'Zacian-Crowned', 'Zamazenta', 'Zamazenta-Crowned', 'Eternatus'].includes(species.name)
 			) {
 				continue;
 			}
@@ -2562,14 +2539,8 @@ export class RandomGen8Teams {
 
 			// Okay, the set passes, add it to our team
 			pokemon.push(set);
-			if (pokemon.length === this.maxTeamSize) {
-				// Set Zoroark's level to be the same as the last Pokemon
-				const illusion = teamDetails.illusion;
-				if (illusion) pokemon[illusion - 1].level = pokemon[this.maxTeamSize - 1].level;
-
-				// Don't bother tracking details for the last Pokemon
-				break;
-			}
+			// Don't bother tracking details for the last Pokemon
+			if (pokemon.length === this.maxTeamSize) break;
 
 			// Now that our Pokemon has passed all checks, we can increment our counters
 			baseFormes[species.baseSpecies] = 1;
@@ -2610,9 +2581,6 @@ export class RandomGen8Teams {
 			if (set.moves.includes('auroraveil') || (set.moves.includes('reflect') && set.moves.includes('lightscreen'))) {
 				teamDetails.screens = 1;
 			}
-
-			// For setting Zoroark's level
-			if (set.ability === 'Illusion') teamDetails.illusion = pokemon.length;
 		}
 		if (pokemon.length < this.maxTeamSize && pokemon.length < 12) { // large teams sometimes cannot be built
 			throw new Error(`Could not build a random team for ${this.format} (seed=${seed})`);
@@ -3029,8 +2997,6 @@ export class RandomGen8Teams {
 			typeCount: {}, typeComboCount: {}, baseFormes: {}, has: {}, forceResult: forceResult,
 			weaknesses: {}, resistances: {},
 		};
-		const requiredMoveFamilies: string[] = [];
-		const requiredMoves: {[k: string]: string} = {};
 		const weatherAbilitiesSet: {[k: string]: string} = {
 			drizzle: 'raindance',
 			drought: 'sunnyday',
@@ -3044,31 +3010,29 @@ export class RandomGen8Teams {
 			thickfat: ['Ice', 'Fire'],
 			levitate: ['Ground'],
 		};
+		const limitFactor = Math.ceil(this.maxTeamSize / 6);
+		/**
+		 * Weighted random shuffle
+		 * Uses the fact that for two uniform variables x1 and x2, x1^(1/w1) is larger than x2^(1/w2)
+		 * with probability equal to w1/(w1+w2), which is what we want. See e.g. here https://arxiv.org/pdf/1012.0256.pdf,
+		 * original paper is behind a paywall.
+		 */
+		const shuffledSpecies = [];
+		for (const speciesName of pokemonPool) {
+			const sortObject = {
+				speciesName: speciesName,
+				score: Math.pow(this.prng.next(), 1 / this.randomBSSFactorySets[speciesName].usage),
+			};
+			shuffledSpecies.push(sortObject);
+		}
+		shuffledSpecies.sort((a, b) => a.score - b.score);
 
-		while (pokemonPool.length && pokemon.length < this.maxTeamSize) {
-			// Weighted random sampling
-			let maxUsage = 0;
-			const sets: {[k: string]: number} = {};
-			for (const specie of pokemonPool) {
-				if (teamData.baseFormes[this.dex.species.get(specie).baseSpecies]) continue; // Species Clause
-				const usage: number = this.randomBSSFactorySets[specie].usage;
-				sets[specie] = usage + maxUsage;
-				maxUsage += usage;
-			}
-
-			const usage = this.random(1, maxUsage);
-			let last = 0;
-			let specie;
-			for (const key of Object.keys(sets)) {
-				 if (usage > last && usage <= sets[key]) {
-					 specie = key;
-					 break;
-				 }
-				 last = sets[key];
-			}
-
+		while (shuffledSpecies.length && pokemon.length < this.maxTeamSize) {
+			// repeated popping from weighted shuffle is equivalent to repeated weighted sampling without replacement
+			const specie = shuffledSpecies.pop()!.speciesName;
 			const species = this.dex.species.get(specie);
 			if (!species.exists) continue;
+
 			if (this.forceMonotype && !species.types.includes(this.forceMonotype)) continue;
 
 			// Limit to one of each species (Species Clause)
@@ -3077,10 +3041,12 @@ export class RandomGen8Teams {
 			// Limit 2 of any type (most of the time)
 			const types = species.types;
 			let skip = false;
-			for (const type of types) {
-				if (teamData.typeCount[type] > 1 && this.randomChance(4, 5)) {
-					skip = true;
-					break;
+			if (!this.forceMonotype) {
+				for (const type of types) {
+					if (teamData.typeCount[type] >= 2 * limitFactor && this.randomChance(4, 5)) {
+						skip = true;
+						break;
+					}
 				}
 			}
 			if (skip) continue;
@@ -3094,7 +3060,7 @@ export class RandomGen8Teams {
 				// Drought and Drizzle don't count towards the type combo limit
 				typeCombo = set.ability;
 			}
-			if (typeCombo in teamData.typeComboCount) continue;
+			if (!this.forceMonotype && teamData.typeComboCount[typeCombo] >= limitFactor) continue;
 
 			const itemData = this.dex.items.get(set.item);
 			if (teamData.has[itemData.id]) continue; // Item Clause
@@ -3110,7 +3076,11 @@ export class RandomGen8Teams {
 					teamData.typeCount[type] = 1;
 				}
 			}
-			teamData.typeComboCount[typeCombo] = 1;
+			if (typeCombo in teamData.typeComboCount) {
+				teamData.typeComboCount[typeCombo]++;
+			} else {
+				teamData.typeComboCount[typeCombo] = 1;
+			}
 
 			teamData.baseFormes[species.baseSpecies] = 1;
 
@@ -3127,9 +3097,6 @@ export class RandomGen8Teams {
 					teamData.has[moveId]++;
 				} else {
 					teamData.has[moveId] = 1;
-				}
-				if (moveId in requiredMoves) {
-					teamData.has[requiredMoves[moveId]] = 1;
 				}
 			}
 
@@ -3151,15 +3118,12 @@ export class RandomGen8Teams {
 				}
 			}
 		}
-		if (pokemon.length < this.maxTeamSize) return this.randomBSSFactoryTeam(side, ++depth);
+		if (!teamData.forceResult && pokemon.length < this.maxTeamSize) return this.randomBSSFactoryTeam(side, ++depth);
 
-		// Quality control
-		if (!teamData.forceResult) {
-			for (const requiredFamily of requiredMoveFamilies) {
-				if (!teamData.has[requiredFamily]) return this.randomBSSFactoryTeam(side, ++depth);
-			}
+		// Quality control we cannot afford for monotype
+		if (!teamData.forceResult && !this.forceMonotype) {
 			for (const type in teamData.weaknesses) {
-				if (teamData.weaknesses[type] >= 3) return this.randomBSSFactoryTeam(side, ++depth);
+				if (teamData.weaknesses[type] >= 3 * limitFactor) return this.randomBSSFactoryTeam(side, ++depth);
 			}
 		}
 

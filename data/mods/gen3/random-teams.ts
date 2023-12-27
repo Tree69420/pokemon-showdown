@@ -3,6 +3,12 @@ import {Utils} from '../../../lib';
 import {PRNG, PRNGSeed} from '../../../sim/prng';
 import type {MoveCounter, OldRandomBattleSpecies} from '../gen8/random-teams';
 
+// Moves that shouldn't be the only STAB moves:
+const NO_STAB = [
+	'bounce', 'eruption', 'explosion', 'fakeout', 'icywind', 'machpunch',
+	'pursuit', 'quickattack', 'reversal', 'selfdestruct', 'waterspout',
+];
+
 export class RandomGen3Teams extends RandomGen4Teams {
 	battleHasDitto: boolean;
 	battleHasWobbuffet: boolean;
@@ -11,6 +17,7 @@ export class RandomGen3Teams extends RandomGen4Teams {
 
 	constructor(format: string | Format, prng: PRNG | PRNGSeed | null) {
 		super(format, prng);
+		this.noStab = NO_STAB;
 		this.battleHasDitto = false;
 		this.battleHasWobbuffet = false;
 		this.moveEnforcementCheckers = {
@@ -68,7 +75,8 @@ export class RandomGen3Teams extends RandomGen4Teams {
 				cull: (
 					counter.setupType !== 'Special' ||
 					(counter.get('Special') + counter.get('specialpool') < 2 && !moves.has('batonpass') &&
-					!moves.has('refresh') && !restTalk)
+					!moves.has('refresh') && !restTalk) ||
+					!counter.get('Special')
 				),
 				isSetup: true,
 			};
@@ -389,7 +397,7 @@ export class RandomGen3Teams extends RandomGen4Teams {
 
 		if (typeof species.battleOnly === 'string') forme = species.battleOnly;
 
-		const movePool = (data.moves || Object.keys(this.dex.species.getLearnset(species.id)!)).slice();
+		const movePool: string[] = [...(data.moves || this.dex.species.getMovePool(species.id))];
 		const rejectedPool = [];
 		const moves = new Set<string>();
 		let ability = '';
@@ -457,7 +465,7 @@ export class RandomGen3Teams extends RandomGen4Teams {
 				const requiresStab = (
 					!counter.get('stab') &&
 					!moves.has('seismictoss') && !moves.has('nightshade') &&
-					species.id !== 'castform' && species.id !== 'umbreon' &&
+					species.id !== 'umbreon' &&
 					// If a Flying-type has Psychic, it doesn't need STAB
 					!(moves.has('psychic') && types.has('Flying')) &&
 					!(types.has('Ghost') && species.baseStats.spa > species.baseStats.atk) &&
@@ -701,7 +709,7 @@ export class RandomGen3Teams extends RandomGen4Teams {
 				}
 			}
 
-			// Updateeam details
+			// Update team details
 			if (set.ability === 'Drizzle' || set.moves.includes('raindance')) teamDetails.rain = 1;
 			if (set.ability === 'Sand Stream') teamDetails.sand = 1;
 			if (set.moves.includes('spikes')) teamDetails.spikes = 1;

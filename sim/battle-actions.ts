@@ -264,6 +264,12 @@ export class BattleActions {
 			pokemon.moveThisTurnResult = willTryMove;
 			return;
 		}
+
+		// Used exclusively for a hint later
+		if (move.flags['cantusetwice'] && pokemon.lastMove?.id === move.id) {
+			pokemon.addVolatile(move.id);
+		}
+
 		if (move.beforeMoveCallback) {
 			if (move.beforeMoveCallback.call(this.battle, pokemon, target, move)) {
 				this.battle.clearActiveMove(true);
@@ -308,6 +314,9 @@ export class BattleActions {
 		if (this.battle.activeMove) move = this.battle.activeMove;
 		this.battle.singleEvent('AfterMove', move, null, pokemon, target, move);
 		this.battle.runEvent('AfterMove', pokemon, target, move);
+		if (move.flags['cantusetwice'] && pokemon.removeVolatile(move.id)) {
+			this.battle.add('-hint', `Some effects can force a Pokemon to use ${move.name} again in a row.`);
+		}
 
 		// Dancer's activation order is completely different from any other event, so it's handled separately
 		if (move.flags['dance'] && moveDidSomething && !move.isExternal) {
@@ -729,7 +738,9 @@ export class BattleActions {
 		if (move.breaksProtect) {
 			for (const target of targets) {
 				let broke = false;
-				for (const effectid of ['banefulbunker', 'kingsshield', 'obstruct', 'protect', 'silktrap', 'spikyshield']) {
+				for (const effectid of [
+					'banefulbunker', 'burningbulwark', 'kingsshield', 'obstruct', 'protect', 'silktrap', 'spikyshield',
+				]) {
 					if (target.removeVolatile(effectid)) broke = true;
 				}
 				if (this.battle.gen >= 6 || !target.isAlly(pokemon)) {
@@ -1721,19 +1732,37 @@ export class BattleActions {
 		baseDamage = this.battle.randomizer(baseDamage);
 
 		// STAB
+		const isTeraStellarBoosted = pokemon.terastallized === 'Stellar' && !pokemon.stellarBoostedTypes.includes(type);
 		if (move.forceSTAB || (type !== '???' &&
-			(pokemon.hasType(type) || (pokemon.terastallized && pokemon.getTypes(false, true).includes(type))))) {
+			(pokemon.hasType(type) || (pokemon.terastallized && pokemon.getTypes(false, true).includes(type)) ||
+				isTeraStellarBoosted))) {
 			// The "???" type never gets STAB
 			// Not even if you Roost in Gen 4 and somehow manage to use
 			// Struggle in the same turn.
 			// (On second thought, it might be easier to get a MissingNo.)
 
-			let stab = move.stab || 1.5;
-			if (type === pokemon.terastallized && pokemon.getTypes(false, true).includes(type)) {
-				// In my defense, the game hardcodes the Adaptability check like this, too.
-				stab = stab === 2 ? 2.25 : 2;
-			} else if (pokemon.terastallized && type !== pokemon.terastallized) {
-				stab = 1.5;
+			// The Stellar tera type makes this incredibly confusing
+			// If the move's type does not match one of the user's base types,
+			// the Stellar tera type applies a one-time 1.2x damage boost for that type.
+			//
+			// If the move's type does match one of the user's base types,
+			// then the Stellar tera type applies a one-time 2x STAB boost for that type,
+			// and then goes back to using the regular 1.5x STAB boost for those types.
+
+			let stab: number | [number, number];
+			if (isTeraStellarBoosted) {
+				stab = pokemon.getTypes(false, true).includes(type) ? 2 : [4915, 4096];
+				if (pokemon.species.name !== 'Terapagos-Stellar') {
+					pokemon.stellarBoostedTypes.push(type);
+				}
+			} else {
+				stab = move.stab || 1.5;
+				if (type === pokemon.terastallized && pokemon.getTypes(false, true).includes(type)) {
+					// In my defense, the game hardcodes the Adaptability check like this, too.
+					stab = stab === 2 ? 2.25 : 2;
+				} else if (pokemon.terastallized && type !== pokemon.terastallized) {
+					stab = 1.5;
+				}
 			}
 			baseDamage = this.battle.modify(baseDamage, stab);
 		}
@@ -1854,15 +1883,18 @@ export class BattleActions {
 	}
 
 	canTerastallize(pokemon: Pokemon) {
-		if (pokemon.getItem().zMove || pokemon.canMegaEvo || pokemon.side.canDynamaxNow() || this.dex.gen !== 9) {
+		if (pokemon.getItem().zMove || pokemon.canMegaEvo || this.dex.gen !== 9) {
 			return null;
 		}
 		return pokemon.teraType;
 	}
 
 	terastallize(pokemon: Pokemon) {
-		const type = pokemon.teraType;
+		if (pokemon.illusion && ['Ogerpon', 'Terapagos'].includes(pokemon.illusion.species.baseSpecies)) {
+			this.battle.singleEvent('End', this.dex.abilities.get('Illusion'), pokemon.abilityState, pokemon);
+		}
 
+		const type = pokemon.teraType;
 		this.battle.add('-terastallize', pokemon, type);
 		pokemon.terastallized = type;
 		for (const ally of pokemon.side.pokemon) {
@@ -1871,6 +1903,20 @@ export class BattleActions {
 		pokemon.addedType = '';
 		pokemon.knownType = true;
 		pokemon.apparentType = type;
+		if (pokemon.species.baseSpecies === 'Ogerpon') {
+			const tera = pokemon.species.id === 'ogerpon' ? 'tealtera' : 'tera';
+			pokemon.formeChange(pokemon.species.id + tera, null, true);
+		}
+		if (pokemon.species.name === 'Terapagos-Terastal' && type === 'Stellar') {
+			pokemon.formeChange('Terapagos-Stellar', null, true);
+			pokemon.baseMaxhp = Math.floor(Math.floor(
+				2 * pokemon.species.baseStats['hp'] + pokemon.set.ivs['hp'] + Math.floor(pokemon.set.evs['hp'] / 4) + 100
+			) * pokemon.level / 100 + 10);
+			const newMaxHP = pokemon.baseMaxhp;
+			pokemon.hp = newMaxHP - (pokemon.maxhp - pokemon.hp);
+			pokemon.maxhp = newMaxHP;
+			this.battle.add('-heal', pokemon, pokemon.getHealth, '[silent]');
+		}
 		this.battle.runEvent('AfterTerastallization', pokemon);
 	}
 
